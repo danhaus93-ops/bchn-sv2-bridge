@@ -56,6 +56,12 @@ async def read_frame(reader):
     ln = struct.unpack("<I", hdr[3:6] + b"\x00")[0]
     return mtype, (await reader.readexactly(ln) if ln else b"")
 
+async def read_frame_ext(reader):
+    hdr = await reader.readexactly(6)
+    ext = struct.unpack("<H", hdr[0:2])[0]
+    ln = struct.unpack("<I", hdr[3:6] + b"\x00")[0]
+    return ext, hdr[2], (await reader.readexactly(ln) if ln else b"")
+
 async def mock_pool(port, results):
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     # 1. handshake
@@ -65,6 +71,22 @@ async def mock_pool(port, results):
     assert mtype == sv2.MSG_SETUP_CONNECTION_SUCCESS, hex(mtype)
     assert sv2.parse_setup_success(p)["used_version"] == 2
     results.append("handshake")
+    # 2. extension negotiation: the bridge implements none, and says so at
+    #    once instead of leaving the client to time out
+    writer.write(sv2.build_request_extensions(7, [0x4C54, 0x0002]))
+    await writer.drain()
+    ext, mtype, p = await asyncio.wait_for(read_frame_ext(reader), timeout=2)
+    assert (ext, mtype) == (sv2.EXT_NEGOTIATION,
+                            sv2.MSG_REQUEST_EXTENSIONS_ERROR), (hex(ext), hex(mtype))
+    err = sv2.parse_request_extensions_error(p)
+    assert err == {"request_id": 7, "unsupported_extensions": [0x4C54, 0x0002],
+                   "required_extensions": []}, err
+    results.append("extensions-refused")
+    # 3. a message of an unknown extension is discarded, even when its
+    #    msg_type is a core one (0x73 is RequestTransactionData)
+    writer.write(sv2.frame(sv2.MSG_REQUEST_TX_DATA,
+                           bytes(sv2.Writer().u64(1).b), 0x4C54))
+    await writer.drain()
     # SPEC: nothing should arrive until we declare constraints
     try:
         await asyncio.wait_for(reader.readexactly(1), timeout=0.4)
@@ -145,7 +167,7 @@ async def main():
     port = server.sockets[0].getsockname()[1]
     results = []
     pool_task = asyncio.create_task(mock_pool(port, results))
-    await asyncio.sleep(0.6)             # let handshake+solution complete
+    await asyncio.sleep(1.0)             # let handshake+solution complete
     assert node.submitted, "no block was submitted"
     # trigger rotation AFTER solution landed
     node.height += 1

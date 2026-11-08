@@ -149,6 +149,25 @@ class Bridge:
             # SPEC: template is sent in reply to CoinbaseOutputConstraints
             while True:
                 ext, mtype, payload = await self._read_frame(reader)
+                ext_type = ext & ~sv2.CHANNEL_MSG_BIT
+                if (ext_type == sv2.EXT_NEGOTIATION
+                        and mtype == sv2.MSG_REQUEST_EXTENSIONS):
+                    # SPEC (extension 0x0001): this provider implements no
+                    # extensions, so it says so at once; a client then goes
+                    # on without waiting out its timeout.
+                    req = sv2.parse_request_extensions(payload)
+                    self.log(f"[bridge] extensions requested "
+                             f"{req['requested_extensions']}: none supported")
+                    writer.write(sv2.build_request_extensions_error(
+                        req["request_id"], req["requested_extensions"]))
+                    await writer.drain()
+                    continue
+                if ext_type != 0:
+                    # SPEC 3.4: messages of an unknown extension are discarded,
+                    # never read as the core message with the same msg_type.
+                    self.log(f"[bridge] ignoring extension 0x{ext_type:04x} "
+                             f"msg_type 0x{mtype:02x}")
+                    continue
                 if mtype == sv2.MSG_COINBASE_OUTPUT_CONSTRAINTS:
                     c = sv2.parse_coinbase_output_constraints(payload)
                     self.log(f"[bridge] pool constraints: {c}")

@@ -28,6 +28,13 @@ MSG_REQUEST_TX_DATA_SUCCESS   = 0x74
 MSG_REQUEST_TX_DATA_ERROR     = 0x75
 MSG_SUBMIT_SOLUTION           = 0x76
 
+# --- extension negotiation (SV2 extension 0x0001) ---
+EXT_NEGOTIATION                = 0x0001
+MSG_REQUEST_EXTENSIONS         = 0x00
+MSG_REQUEST_EXTENSIONS_SUCCESS = 0x01
+MSG_REQUEST_EXTENSIONS_ERROR   = 0x02
+CHANNEL_MSG_BIT                = 0x8000   # top bit of extension_type
+
 PROTOCOL_TEMPLATE_DISTRIBUTION = 2
 SV2_VERSION = 2
 
@@ -56,6 +63,10 @@ class Writer:
         assert len(items) <= 0xffff; self.u16(len(items))
         for i in items: self.b0_16m(i)
         return self
+    def seq0_64k_u16(self, items):
+        assert len(items) <= 0xffff; self.u16(len(items))
+        for i in items: self.u16(i)
+        return self
 
 class Reader:
     def __init__(self, b): self.b = b; self.o = 0
@@ -76,6 +87,7 @@ class Reader:
     def str0_255(self): return self.b0_255().decode()
     def seq0_255_u256(self): return [self.u256() for _ in range(self.u8())]
     def seq0_64k_b016m(self): return [self.b0_16m() for _ in range(self.u16())]
+    def seq0_64k_u16(self): return [self.u16() for _ in range(self.u16())]
     def remaining(self): return len(self.b) - self.o
 
 def frame(msg_type: int, payload: bytes, extension_type: int = 0) -> bytes:
@@ -185,3 +197,24 @@ def parse_submit_solution(p):
     return {"template_id": r.u64(), "version": r.u32(),
             "header_timestamp": r.u32(), "header_nonce": r.u32(),
             "coinbase_tx": r.b0_64k()}
+
+# --- extension negotiation (extension_type 0x0001) ---
+def build_request_extensions(request_id, requested):
+    w = Writer().u16(request_id).seq0_64k_u16(requested)
+    return frame(MSG_REQUEST_EXTENSIONS, bytes(w.b), EXT_NEGOTIATION)
+
+def parse_request_extensions(p):
+    r = Reader(p)
+    out = {"request_id": r.u16(), "requested_extensions": r.seq0_64k_u16()}
+    if r.remaining(): raise ValueError("trailing bytes")
+    return out
+
+def build_request_extensions_error(request_id, unsupported, required=()):
+    w = Writer().u16(request_id).seq0_64k_u16(list(unsupported))
+    w.seq0_64k_u16(list(required))
+    return frame(MSG_REQUEST_EXTENSIONS_ERROR, bytes(w.b), EXT_NEGOTIATION)
+
+def parse_request_extensions_error(p):
+    r = Reader(p)
+    return {"request_id": r.u16(), "unsupported_extensions": r.seq0_64k_u16(),
+            "required_extensions": r.seq0_64k_u16()}
